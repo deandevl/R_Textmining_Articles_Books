@@ -1,0 +1,344 @@
+---
+title: "Text Mining With R"
+output: 
+  html_document:
+    toc: yes
+    toc_depth: 3
+    css: ../style.css
+params:
+  date: !r Sys.Date()      
+---
+
+```{r, message = FALSE, warning = FALSE}
+library(data.table)
+library(tidytext)
+library(textdata)
+library(syuzhet)
+library(stringr)
+library(janeaustenr)
+library(gutenbergr)
+library(grid)
+library(gtable)
+library(ggplot2)
+library(RtextminerPkg)
+library(RplotterPkg)
+```
+
+```{r,setup, include=FALSE, eval=TRUE}
+options(knitr.table.format = "html")
+knitr::opts_chunk$set(echo = TRUE, results="as-is", collapse=TRUE, message = FALSE, warning = FALSE, fig.width = 12, fig.height = 8)
+```
+
+<div>Author: Rick Dean</div>
+<div>Article date: `r params$date`</div>
+
+<div class="abstract">
+  <p class="abstract">Abstract</p>
+  The following notes/R scripts were inspired from Chapter 2 of [Text Mining With R](https://www.tidytextmining.com/index.html) by Julia Silge and David Robinson
+</div>  
+
+<div class="note">Note: Functions from the `data.table` and `RtextminerPkg` packages are used in performing many of the following data set operations.</div>
+
+# Sentiment Analysis with Tidy Data
+
+## The sentiments datasets
+
+### Look at the "afinn" dictionary
+
+```{r}
+afinn_dt <- data.table::setDT(textdata::lexicon_afinn())
+str(afinn_dt)
+```
+### Look at the "bing" dictionary
+```{r}
+bing_dt <- data.table::setDT(tidytext::sentiments)
+str(bing_dt)
+```
+### Look at the  "nrc" dictionary
+```{r}
+nrc_dt <- data.table::setDT(syuzhet::get_sentiment_dictionary("nrc", language = "english"))
+str(nrc_dt)
+```
+
+## Sentiment analysis with inner join
+### Sentiment analysis in the Jane Austen book `Emma`
+1. Get the Austen books:
+```{r}
+jane_austen_books_dt <- data.table::setDT(janeaustenr::austen_books())
+str(jane_austen_books_dt)
+```
+
+2. Create a *chapter* column from *jane_austen_books_dt*:
+```{r}
+jane_austen_books_dt[, `:=`(linenumber = .I, chapter = cumsum(str_detect(text, regex("^chapter [\\divxlc]", ignore_case = TRUE))))]
+str(jane_austen_books_dt)
+```
+
+3. Using `RtextminerPkg::tokenize_text()` to get the words of Jane Austen books:
+```{r}
+austen_words_lst <- RtextminerPkg::tokenize_text(
+  x = jane_austen_books_dt,
+  input_col = "text",
+  output_col = "word",
+  #stopwords = stopwords::stopwords(language = "en"),
+  stopwords = tidytext::stop_words$word,
+  strip_punct = TRUE
+)
+austen_words_lst$tokens_dt[1:10]
+```
+4. Select the `Emma` words:
+```{r}
+emma_words_dt <- austen_words_lst$tokens_dt[book == "Emma"]
+emma_words_dt[1:10]
+```
+5. Get the "joy" words from the "nrc" dictionary:
+```{r}
+joy_words_dt <- nrc_dt[sentiment == "joy"]
+joy_words_dt[1:10]
+```
+6. Inner join the "joy" words with the words in `Emma`:
+```{r}
+emma_joy_dt <- RtextminerPkg::join_words(emma_words_dt, joy_words_dt)
+emma_joy_dt[, .(book, sentiment, value)][1:10]
+```
+7. Get the frequency of words that are "joy":
+```{r}
+emma_joy_n_dt <- emma_joy_dt[, .(.N), by = word][order(-N)]
+emma_joy_n_dt[1:10]
+```
+
+## Sentiment changes
+
+1. Inner join all of the Jane Austen books of words with the `Bing` lexicon:
+```{r}
+austen_bing_dt <- RtextminerPkg::join_words(austen_words_lst$tokens_dt, bing_dt)
+austen_bing_dt[1:10]
+```
+2. Add an *index* column that reflects each word's location by dividing the *linenumber* variable by integer of 80. The *index* keeps track of which 80-line section of the text we are counting up negative and positive sentiments in:
+```{r}
+austen_bing_dt[, index := (linenumber %/% 80)]
+austen_bing_dt[,.(book, word, sentiment, index)][1:10]
+```
+3. Group by *book*, *index*, and *sentiment* and get the counts:
+```{r}
+austen_sentiment_dt <- austen_bing_dt[, .(.N), by = .(book, index, sentiment)]
+austen_sentiment_dt[1:10][order(-N)]
+```
+4. To plot the above results, reshape *austen_sentiment_dt* to a "wide" format where we collect all the *N* values across the same row based on columns of *sentiment*:
+```{r}
+austen_sentiment_wide_dt <- data.table::dcast(austen_sentiment_dt, book + index ~ sentiment, value.var = "N")
+str(austen_sentiment_wide_dt)
+```
+5. Add a *sentiment_val* column to *austen_sentiment_wide_dt* by taking the difference in the frequency values (i.e. *positive* - *negative*):
+```{r}
+austen_sentiment_wide_dt[, sentiment_val := (positive - negative)]
+austen_sentiment_wide_dt[1:10]
+```
+6. Plot the *sentiment_val* across the *index* for each of the books:
+```{r, fig.height=12, fig.width=13}
+RplotterPkg::multi_stick_plot(
+  df = austen_sentiment_wide_dt,
+  factor_var = "book",
+  factor_x = "index",
+  aes_y = "sentiment_val",
+  title = "Net Difference Between Counts of Positive and Negative Words of Sentiment",
+  subtitle = "Net counts from ordered 80 character segments in novels by Jane Austen",
+  x_title = "Book Index Location",
+  y_titles = rep("Net Sentiment Count",6),
+  y_limits = c(-30,30),
+  y_major_breaks = seq(-30,30,10),
+  rot_y_tic_label = T,
+  col_width = 5.5,
+  row_height = 3
+)
+```
+
+<blockquote>The plots show how each novel changes toward more positive or negative sentiment over the trajectory of the story.</blockquote>
+
+## Comparing sentiment lexicons
+
+### Comparing afinn, bing, and nrc lexicons for sentiment classification
+<div class="note">Note: See the R script for this topic in the current directory at `compare_lexicons.R`</div>
+
+
+### Comparing NRC with Bing for the ratio of negative to positive
+1. Get the ratio of negetive over positive words in the NRC lexicon:
+```{r}
+nrc_dt <- data.table::setDT(syuzhet::get_sentiment_dictionary("nrc", language = "english"))
+nrc_neg_pos_dt <- nrc_dt[sentiment %in% c("positive", "negative"), .N ,by = sentiment]
+str(nrc_neg_pos_dt)
+```
+2. Take the ratio of negative to positive counts:
+```{r}
+nrc_neg_pos_ratio <- nrc_neg_pos_dt$N[[2]]/nrc_neg_pos_dt$N[[1]]
+nrc_neg_pos_ratio
+```
+
+3. Get the ratio of negative over positive words in the Bing lexicon:
+```{r}
+bing_dt <- data.table::setDT(tidytext::sentiments)
+bing_neg_pos_dt <- bing_dt[, .N, by = sentiment]
+str(bing_neg_pos_dt)
+```
+4. Take the ratio of negative to positive counts:
+```{r}
+bing_neg_pos_ratio <- bing_neg_pos_dt$N[[1]]/bing_neg_pos_dt$N[[2]]
+bing_neg_pos_ratio
+```
+
+<div class="note">Note: There appears to be higher negative words in both lexicons and with a higher ratio in Bing.</div>
+
+### Most common positive and negative words in a text
+
+1. Find the words across all of Austen's novelsd:
+```{r}
+jane_austen_books_dt <- data.table::setDT(janeaustenr::austen_books())
+austen_words_lst <- RtextminerPkg::tokenize_text(
+  x = jane_austen_books_dt,
+  input_col = "text",
+  output_col = "word"
+) 
+austen_words_dt <- austen_words_lst$tokens_dt
+str(austen_words_dt)
+```
+
+2. Do an inner join of all the Austen words with the Bing lexicon:
+```{r}
+bing_dt <- data.table::setDT(tidytext::sentiments)
+austen_bing_dt <- RtextminerPkg::join_words(austen_words_dt, bing_dt)
+str(austen_bing_dt)
+```
+3. Get the top word counts that are common to both the Austen and Bing lexicon words:
+```{r}
+austen_bing_counts_dt <- austen_bing_dt[, .N, by = .(word, sentiment)][order(-N)]
+austen_bing_counts_dt[1:10]
+```
+
+4. Plot a bar chart of the top 10 positive and negative words:
+```{r, fig.width=12}
+austen_bing_positive_dt <- austen_bing_counts_dt[sentiment == "positive"][1:10]
+austen_bing_negative_dt <- austen_bing_counts_dt[sentiment == "negative"][1:10]
+positive_wrd_plot <- RplotterPkg::create_bar_plot(
+  df = austen_bing_positive_dt,
+  aes_x = "word",
+  aes_y = "N",
+  title = "Top Positive Words",
+  do_coord_flip = T,
+  rot_y_tic_label = T,
+  bar_fill = "green",
+  order_bars = "asc"
+)
+negative_wrd_plot <- RplotterPkg::create_bar_plot(
+  df = austen_bing_negative_dt,
+  aes_x = "word",
+  aes_y = "N",
+  title = "Top Negative Words",
+  do_coord_flip = T,
+  rot_y_tic_label = T,
+  bar_fill = "red",
+  order_bars = "asc"
+)
+layout <- list(
+  plots = list(positive_wrd_plot, negative_wrd_plot),
+  rows = c(1,1),
+  cols = c(1,2)
+)
+RplotterPkg::multi_panel_grid(
+  layout = layout,
+  col_widths = c(5,5),
+  row_heights = c(5),
+  title = "Word Frequency for Positive and Negative Sentiments",
+  subtitle = "Using the Bing lexicon across all Jane Austen novels."
+)
+```
+
+## Using a regex pattern for tokenization
+
+### Number of chapters in each book
+1. Get Jane Auten books:
+```{r}
+jane_austen_books_dt <- data.table::setDT(janeaustenr::austen_books())
+```
+
+2. Tokenize the text using regex to locate rows with a chapter pattern:
+```{r}
+jane_austen_books_dt <- data.table::setDT(janeaustenr::austen_books())
+jane_austen_chapters_dt <- RtextminerPkg::tokenize_text(
+  x = jane_austen_books_dt,
+  type = "regex",
+  input_col = "text",
+  output_col = "chapter",
+  regex_pattern = "Chapter|CHAPTER [\\dIVXLC]",
+  regex_return = "logical"
+)
+
+```
+3. Sum the number of chapters for each book:
+```{r}
+jane_auten_chapters_totals_dt <- jane_austen_chapters_dt$tokens_dt[, .(chapters = sum(chapter)), by = book]
+print(jane_auten_chapters_totals_dt)
+```
+
+### Number of words in each chapter
+1. Get the Austen books and add a *chapter* variable:
+```{r}
+ja_books_dt <- data.table::setDT(janeaustenr::austen_books())
+ja_books_dt[, chapter := cumsum(str_detect(text, regex("^chapter [\\divxlc]", ignore_case = TRUE))), by = book]
+str(ja_books_dt)
+```
+2. Remove the "0" chapter:
+```{r}
+ja_books_dt <- ja_books_dt[chapter != 0]
+str(ja_books_dt)
+```
+
+3. Tokenize `ja_books_dt` by word:
+```{r}
+ja_words_lst <- RtextminerPkg::tokenize_text(
+  x = ja_books_dt,
+  input_col = "text",
+  output_col = "word"
+) 
+ja_words_dt <- ja_words_lst$tokens_dt
+str(ja_words_dt)
+```
+
+4. Get the number of words in each chapter:
+```{r}
+ja_chapter_wrds_n_dt <- ja_words_dt[, .(words = .N), by = .(book, chapter)]
+str(ja_chapter_wrds_n_dt)
+```
+### Get the number of negative Bing words in each chapter
+1. Get the negative words from Bing lexicon:
+```{r}
+bing_dt <- data.table::setDT(tidytext::sentiments)
+bing_neg_dt <- bing_dt[sentiment == "negative"]
+str(bing_neg_dt)
+```
+
+2. Inner join the Austen words with the negative Bing words:
+```{r}
+ja_neg_dt <- RtextminerPkg::join_words(ja_words_dt, bing_neg_dt)
+str(ja_neg_dt)
+```
+3. Find the number of negative words in each chapter:
+```{r}
+ja_neg_chap_n_dt <- ja_neg_dt[, .(neg_words = .N), by = .(book, chapter)]
+str(ja_neg_chap_n_dt)
+```
+4. Outer join the number of words in each chapter (*ja_chapter_wrds_n_dt*) with the number of negative words in each chapter (*ja_neg_chap_n_dt*):
+```{r}
+data.table::setkey(ja_chapter_wrds_n_dt, book, chapter)
+data.table::setkey(ja_neg_chap_n_dt, book, chapter)
+ja_neg_join_dt <- ja_chapter_wrds_n_dt[ja_neg_chap_n_dt, nomatch = 0]
+str(ja_neg_join_dt)
+```
+5. Add a *ratio* variable dividing *neg_words* by *words*:
+```{r}
+ja_neg_join_dt[, ratio := neg_words/words][order(-ratio)][1:10]
+```
+6. Show Emma, chapter 15:
+```{r}
+ja_neg_join_dt[book == "Emma" & chapter == 15]
+```
+

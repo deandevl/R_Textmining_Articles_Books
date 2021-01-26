@@ -1,0 +1,342 @@
+---
+title: "Text Mining With R"
+output: 
+  html_document:
+    toc: yes
+    toc_depth: 3
+    css: ../style.css
+params:
+  date: !r Sys.Date()      
+---
+
+```{r, message = FALSE, warning = FALSE}
+library(data.table)
+library(magrittr)
+library(tidytext)
+library(textdata)
+library(widyr)
+library(magrittr)
+library(janeaustenr)
+library(gutenbergr)
+library(igraph)
+library(grid)
+library(gtable)
+library(ggplot2)
+library(stringr)
+library(RtextminerPkg)
+library(RplotterPkg)
+```
+
+```{r,setup, include=FALSE, eval=TRUE}
+options(knitr.table.format = "html")
+knitr::opts_chunk$set(echo = TRUE, collapse=TRUE, message = FALSE, warning = FALSE, fig.width = 12, fig.height = 6)
+```
+
+<div>Author: Rick Dean</div>
+<div>Article date: `r params$date`</div>
+
+<div class="abstract">
+  <p class="abstract">Abstract</p>
+  The following notes/R scripts were inspired from Chapter 4 of [Text Mining With R](https://www.tidytextmining.com/index.html) by Julia Silge and David Robinson
+</div>  
+
+<div class="note">Note: Functions from the `data.table` and `RtextminerPkg` packages are used in performing many of the following data set operations.</div>
+
+# Relationships between words
+
+## Tokenizing by n-gram
+Tokenize into consecutive sequences of words, called n-grams.  By seeing how often word X is followed by word Y
+we can then build a model of the relationship between them.
+
+### Using RtextminerPkg::tokenize_text to produce n-grams
+
+1. Get the Austen books:
+```{r}
+austen_books_dt <- data.table::setDT(janeaustenr::austen_books())
+head(austen_books_dt)
+```
+
+2.Call RtextminerPkg::tokenize_text:
+```{r}
+austen_bigrams_dt <- RtextminerPkg::tokenize_text(
+  x = austen_books_dt,
+  type = "ngram",
+  output_col = "bigram",
+  strip_punct = T,
+  stopwords = tidytext::stop_words$word
+)
+head(austen_bigrams_dt$tokens_dt)
+```
+<div class="note">Note: Each row shows both the bigram words separated and concatenated. `RtextminerPkg::tokenize_text()` in its output list also has a data.table (named *austen_bigrams_dt$tokens_count*) that has the bigram counts.  Here is a look at that data.table with the counts in descending order:</div>
+```{r}
+head(austen_bigrams_dt$tokens_count)
+```
+We can see that proper names are the most common pairs in Jane Austen books.
+
+### Create a trigram of the books
+```{r}
+trigram_dt <- RtextminerPkg::tokenize_text(
+  x = austen_books_dt,
+  type = "ngram",
+  n_gram = 3L,
+  output_col = "trigram",
+  strip_punct = T,
+  stopwords = tidytext::stop_words$word
+)
+head(trigram_dt$tokens_count)
+```
+## Analyzing bigrams
+
+### The most common streets in each book
+```{r}
+bigrams_filtered_dt <- austen_bigrams_dt$tokens_dt[token_2 == "street", .(N = .N), by = .(book, token_1)][order(-N)]
+head(bigrams_filtered_dt)
+```
+### Compute tf-idf for bigrams
+1. Call `RtextminerPkg::get_tf_idf()`:
+```{r}
+level_1_dt <- RtextminerPkg::get_tf_idf(
+  x = austen_books_dt,
+  type = "ngram",
+  feature_id = "book",
+  feature_text = "text",
+  n_gram = 2L,
+  strip_punct = T,
+  stopwords = tidytext::stop_words$word
+)
+head(level_1_dt)
+```
+2. For plotting select the top 15 "token" values in each book subgroup:
+```{r}
+level_2_dt <- level_1_dt[, setorder(.SD, -tf_idf)[1:15], by = feature_id]
+head(level_2_dt)
+```
+3. Plot the if_idf values:
+```{r, fig.width = 14, fig.height = 10}
+tf_idf_plot <- RplotterPkg::multi_bar_plot(
+    df = level_2_dt,
+    factor_var = "feature_id",
+    factor_x = "ngram",
+    columns = 3,
+    aes_y = "tf_idf",
+    y_titles = rep("tf_idf",6),
+    rot_y_tic_label = TRUE,
+    do_coord_flip = TRUE,
+    order_bars = "asc"
+)
+```
+
+## Using bigrams to provide context in sentiment analysis
+By using bigrams we can get a sense of the context of a single word.
+
+### How often are words preceded by the word "not"
+
+1. Get bigrams without stopwords:
+```{r}
+austen_bigrams_dt <- RtextminerPkg::tokenize_text(
+  x = austen_books_dt,
+  type = "ngram",
+  output_col = "bigram",
+)
+```
+2. Filter out "not" for the first token:
+```{r}
+level_1_dt <- austen_bigrams_dt$tokens_dt[token_1=="not", .(N = .N), by = .(token_1, token_2)][order(-N)]
+head(level_1_dt)
+```
+### Get a FINN sentiment value for bigrams that start with "not"
+
+1. Set up the FINN sentiment values:
+```{r}
+afinn_dt <- data.table::setDT(textdata::lexicon_afinn())
+head(afinn_dt)
+```
+2. Filter "not" words:
+```{r}
+level_1_dt <- austen_bigrams_dt$tokens_dt[token_1=="not", .(word = token_2)]
+head(level_1_dt)
+```
+3. Join FINN scores with "not" words:
+```{r}
+data.table::setkey(level_1_dt, word)
+data.table::setkey(afinn_dt, word)
+level_2_dt <- afinn_dt[level_1_dt]
+level_2_dt <- na.omit(level_2_dt, cols = "value")
+head(level_2_dt)
+```
+4. Get an ordered count of the values:
+```{r}
+level_3_dt <- level_2_dt[, .(N = .N), by = .(word, value)][order(-N)]
+head(level_3_dt)
+```
+5. Create variables for *contribution* = *value* * *N* and *fill* = *value* * *N* > 0:
+```{r}
+level_4_dt <- level_3_dt[, .(word, value, N, contribution = value * N, fill = value * N > 0)][order(-abs(contribution))][1:20]
+head(level_4_dt)
+```
+
+6. Create a bar plot of the *contribution* values:
+```{r, fig.width=12, fig.height=8}
+RplotterPkg::create_bar_plot(
+  df = level_4_dt,
+  aes_x = "word",
+  aes_y = "contribution",
+  y_title = "Sentimental Score * Number of Occurrances",
+  aes_fill = "fill",
+  do_coord_flip = T,
+  rot_y_tic_label = T,
+  order_bars = "asc",
+  show_legend = F
+)
+```
+"not like" and "not help" have the largest causes of misidentification, making the book seem more positive than it is.  Also "not afraid" and "not fail" suggest the book is more negative than it is.
+
+### Four words that negate the subsequent term
+
+1. Select the four words and filter the bigrams for those words:
+```{r}
+negation_words <- c("not", "no", "never", "without")
+
+level_1_dt <- austen_bigrams_dt$tokens_dt[token_1 %in% negation_words, .(token_1, word = token_2)]
+head(level_1_dt)
+```
+2. Join FINN scores with "negated" words:
+```{r}
+data.table::setkey(level_1_dt, word)
+data.table::setkey(afinn_dt, word)
+level_2_dt <- afinn_dt[level_1_dt]
+level_2_dt <- na.omit(level_2_dt, cols = "value")
+head(level_2_dt)
+```
+3. Get a subgroup count:
+```{r}
+level_3_dt <- level_2_dt[, .(N = .N), by = .(token_1, word, value)]
+head(level_3_dt)
+```
+5. Define variables *contribution* = *value* * *N* and *fill* = *value* * *N* > 0:
+```{r}
+level_4_dt <- level_3_dt[, .(token_1, word, value, N, contribution = value * N, fill = value * N > 0)]
+head(level_4_dt) 
+```
+6. Define an absolute value for *contribution*:
+```{r}
+level_4_dt[, contribution_abs := abs(contribution)]
+head(level_4_dt)
+```
+7. Group by *token_1* and order the subgroups by *contribution_abs*
+```{r}
+#negated_words_ordered_dt <- negated_words_contrib_dt[, .(word, value, N, contribution,fill), by = token_1][order(-contribution)][1:80]
+
+level_5_dt <- level_4_dt[, setorder(.SD, -contribution_abs)[1:15], by = token_1]
+head(level_5_dt)
+```
+8. Plot the negated words:
+```{r, fig.width=12, fig.height=8}
+RplotterPkg::multi_bar_plot(
+  df = level_5_dt,
+  factor_var = "token_1",
+  factor_x = "word",
+  aes_y = "contribution",
+  aes_fill = "fill",
+  y_titles = rep("Sentimental Score * Number of Occurrances",4),
+  rot_y_tic_label = T,
+  do_coord_flip = T,
+  order_bars = "asc",
+  show_legend = F
+)
+```
+
+## Counting and correlating pairs of words
+
+### Counting pairs of words 
+Divide "Pride and Prejudice" into 10-line sections and see what words tend to appear in the same section.
+
+1. Get "Pride & Prejudice":
+```{r}
+austen_text_dt <- data.table::setDT(austen_books(), keep.rownames = T)
+austen_text_dt <- austen_text_dt[book == "Pride & Prejudice", .(rn = as.numeric(rn), text)]
+head(austen_text_dt)
+```
+2. Create a *section* variable:
+```{r}
+austen_text_section_dt <- austen_text_dt[, section := (rn - 12624) %/% 10] %>% 
+  .[section > 0,]
+head(austen_text_section_dt)
+```
+3. Tokenize text into words:
+```{r}
+austen_tokens_lst <- RtextminerPkg::tokenize_text(
+  x = austen_text_section_dt,
+  stopwords = tidytext::stop_words$word,
+  strip_punct = T
+)
+austen_section_words_dt <- austen_tokens_lst$tokens_dt
+head(austen_section_words_dt)
+```
+4. Get the count of specific word pairs:
+```{r}
+austen_word_pairs_df <- austen_section_words_dt %>% 
+  widyr::pairwise_count(
+    item = word,
+    feature = section,
+    sort = T
+  )
+austen_word_pairs_dt <- data.table::setDT(austen_word_pairs_df)
+head(austen_word_pairs_dt)
+```
+5. Find the count of word pairs where the first word is "darcy":
+```{r}
+darcy_wrds_dt <- austen_word_pairs_dt[item1 == "darcy"]
+str(darcy_wrds_dt)
+```
+
+### Correlating pairs of words
+<blockquote>The `widyr::pairwise_cor()` function lets us find the phi coefficient between words based on how often they appear in the same section.</blockquote>
+
+To compute pairwise word correlation, complete the following 3 steps:
+
+1. Group *austen_section_wrds_dt* by *word* and filter out words with counts greater or equal to 20:
+```{r}
+freq_wrds_dt <- austen_section_words_dt[,.(.N), by = word] %>% 
+  .[N >= 20] %>% 
+  .[order(-N)]
+```
+
+2. Filter *austen_section_words_dt* for just those words in *freq_wrds_dt*:
+```{r}
+freq_wrds_section <- austen_section_words_dt[word %in% freq_wrds_dt$word]
+```
+
+3. Compute word correlations:
+```{r}
+cor_wrds_df <-  widyr::pairwise_cor(freq_wrds_section,word, section, sort = TRUE)
+cor_wrds_dt <- data.table::setDT(cor_wrds_df)
+head(cor_wrds_dt)
+```
+
+### Words correlated with a single word
+Find words most correlated with "pounds":
+```{r}
+cor_pounds_dt <- cor_wrds_dt[item1 == "pounds"]
+head(cor_pounds_dt)
+```
+### Words correlated with a group of words
+
+1. Select the group of words:
+```{r}
+group_word_cor <- cor_wrds_dt[item1 %in% c("elizabeth", "pounds", "married", "pride"),.SD[1:6], by = item1]
+head(group_word_cor)
+```
+2. Plot the word correlations for each group word:
+```{r, fig.width=12, fig.height=8}
+RplotterPkg::multi_bar_plot(
+  df = group_word_cor,
+  factor_var = "item1",
+  factor_x = "item2",
+  aes_y = "correlation",
+  x_title = "Word",
+  rot_y_tic_label = T,
+  do_coord_flip = T,
+  order_bars = "asc"
+)
+```

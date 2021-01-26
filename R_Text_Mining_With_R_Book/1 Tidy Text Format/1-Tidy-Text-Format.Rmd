@@ -1,0 +1,239 @@
+---
+title: "Text Mining With R"
+output: 
+  html_document:
+    toc: yes
+    toc_depth: 3
+    css: ../style.css
+params:
+  date: !r Sys.Date()      
+---
+
+```{r, message = FALSE, warning = FALSE}
+library(data.table)
+library(janeaustenr)
+library(tidytext)
+library(gutenbergr)
+library(stringr)
+library(grid)
+library(gtable)
+library(rlang)
+library(scales)
+library(ggplot2)
+library(ggrepel)
+library(RtextminerPkg)
+library(RplotterPkg)
+```
+
+```{r,setup, include=FALSE, eval=TRUE}
+options(knitr.table.format = "html")
+knitr::opts_chunk$set(echo = TRUE, results="as-is", collapse=TRUE, message = FALSE, warning = FALSE, fig.width = 12, fig.height = 8)
+```
+
+<div>Author: Rick Dean</div>
+<div>Article date: `r params$date`</div>
+
+<div class="abstract">
+  <p class="abstract">Abstract</p>
+  The following notes/R scripts were inspired from Chapter 1 of [Text Mining With R](https://www.tidytextmining.com/index.html) by Julia Silge and David Robinson
+</div>  
+
+<div class="note">Note: Functions from the `data.table` and `RtextminerPkg` packages are used in performing many of the following data set operations.</div>
+
+# The Tidy Text Format
+
+## Tokenize text into words
+
+### Words from Emily Dickinson text
+1. The data:
+```{r}
+emily_vec <- c("Because I could not stop for Death",
+          "He kindly stopped for me",
+          "The Carriage held but just Ourselves",
+          "and Immortality")
+emily_df <- data.frame(
+  line = 1:4,
+  text = emily_vec
+)
+print(emily_df)
+```
+2. Using `RtextminerPkg::tokenize_text()`:
+```{r}
+emily_words_lst <- RtextminerPkg::tokenize_text(
+  x = emily_df,
+  type = "word",
+  output_col = "word"
+)
+```
+The returned list *emily_words_lst* is a named list with: 
+
+1. A `data.table::data.table` named *tokens_dt* with columns for the text's line number and corresponding tokenized words from *emily_df*:
+```{r}
+emily_words_lst$tokens_dt[1:10]
+```
+
+2. A `data.table::data.table` named *tokens_count* showing the frequency of each word in *emily_df*:
+```{r}
+emily_words_lst$tokens_count[1:6]
+```
+
+### Words from the works of Jane Austen
+1. The data:
+```{r}
+jane_austen_books_dt <- data.table::setDT(janeaustenr::austen_books())
+str(jane_austen_books_dt)
+```
+<div class="note">Note: *jane_austen_books_dt* is a data.table and data.frame with a column of character vectors *text* where each vector has a length of 1. </div>
+
+2. Add a *linenumber* and *chapter* columns to *jane_austen_books_dt*:
+```{r}
+jane_austen_books_dt[, `:=`(linenumber = .I, chapter = cumsum(str_detect(text, regex("^chapter [\\divxlc]", ignore_case = TRUE))))]
+str(jane_austen_books_dt)
+```
+
+3. Using `RtextminerPkg::tokenize_text()` to get the words of Jane Austen books:
+```{r}
+austen_words_lst <- RtextminerPkg::tokenize_text(
+  x = jane_austen_books_dt,
+  input_col = "text",
+  output_col = "word",
+  stopwords = tidytext::stop_words$word,
+  strip_punct = TRUE
+)
+```
+4. Show the words from the text:
+```{r}
+austen_words_lst$tokens_dt[1:10]
+```
+5. Show the counts of the words across all the Austen books:
+```{r}
+austen_words_lst$tokens_count[1:6]
+```
+
+6. Show the word counts in a bar chart:
+```{r}
+RplotterPkg::create_bar_plot(
+  df = austen_words_lst$tokens_count[1:13],
+  aes_x = "word",
+  aes_y = "N",
+  title = "Words Counts Across All of Jane Austen's Books",
+  x_title = "Word",
+  rot_y_tic_label = T,
+  do_coord_flip = T,
+  bar_labels = T,
+  order_bars = "asc",
+  bar_fill = "blue",
+  bar_color = "gold",
+  bar_alpha = 0.6,
+  bar_width = 0.7
+)
+```
+
+### Words from the works of H.G. Wells using `gutenbergr`package
+
+1. Download the books using `gutenbergr`:
+```{r}
+hgwells_books_dt <- data.table::setDT(gutenbergr::gutenberg_download(c(35,36,5230,159)))
+str(hgwells_books_dt)
+```
+2. Using `RtextminerPkg::tokenize_text()` to get the words of H. G. Wells:
+```{r}
+hgwells_words_lst <- RtextminerPkg::tokenize_text(
+  x = hgwells_books_dt,
+  input_col = "text",
+  output_col = "word",
+  #stopwords = stopwords::stopwords(language = "en"),
+  stopwords = tidytext::stop_words$word,
+  strip_punct = TRUE
+)
+```
+3. Show the counts of the words across all the H.G. Wells books:
+```{r}
+hgwells_words_lst$tokens_count[1:6]
+```
+### Words from the works of Bronte sisters using `gutenbergr`package
+1. Download the books using `gutenbergr`:
+```{r}
+bronte_books_dt <- data.table::setDT(gutenbergr::gutenberg_download(c(1260, 768, 969, 9182, 767)))
+str(bronte_books_dt)
+```
+2. Using `RtextminerPkg::tokenize_text()` to get the words of Bronte Sisters:
+```{r}
+bronte_words_lst <- RtextminerPkg::tokenize_text(
+  x = bronte_books_dt,
+  input_col = "text",
+  output_col = "word",
+  #stopwords = stopwords::stopwords(language = "en"),
+  stopwords = tidytext::stop_words$word,
+  strip_punct = TRUE
+)
+```
+3. Show the counts of the words across all the Bronte sisters books:
+```{r}
+bronte_words_lst$tokens_count[1:6]
+```
+## Word counts by author/word grouping
+1. Create data.tables for each author by selecting the *word* column from the above author's *tokens_dt* data.table and creating an *author* column:
+```{r}
+austen_words_dt <- austen_words_lst$tokens_dt[, .(word = word, author = "JaneAusten")]
+
+hgwells_words_dt <- hgwells_words_lst$tokens_dt[, .(word = word, author = "HGWells")]
+
+bronte_words_dt <- bronte_words_lst$tokens_dt[, .(word = word, author = "BronteSisters")]
+```
+2. Row bind all of the above word data tables:
+```{r}
+words_combined_dt <- data.table::rbindlist(list(
+  austen_words_dt, 
+  hgwells_words_dt, 
+  bronte_words_dt))
+str(words_combined_dt)
+```
+3. As a check group *words_combined_dt* by (*author*, *word*) and get the *word* counts:
+```{r}
+author_word_counts_dt <- words_combined_dt[, .(.N), by = .(author,word)][order(-N)]
+author_word_counts_dt[1:10]
+```
+<div class="note">Note: Compare these *N*'s with the *N*'s we obtained earlier above.</div>
+
+## Word proportions by author/word grouping
+1. Group *author_word_counts_dt* by author and divide *N* by the sum of *N*:
+```{r}
+author_word_proportions_dt <- author_word_counts_dt[, .(word, N, prop = N/sum(N)), by = .(author)][order(-prop)]
+author_word_proportions_dt[1:10]
+```
+## Create a scatter plot of word proportions between authors
+1. Turn *author_word_proportions_dt* data table into a "wide" data table where we collect all the *prop* values across the same row based on columns of *author*.
+```{r}
+wide_author_dt <- data.table::dcast(author_word_proportions_dt, word ~ author, value.var = "prop")
+str(wide_author_dt)
+```
+2. As a check order the proportions of *JaneAusten* in *wide_author_dt*:
+```{r}
+wide_author_dt[order(-JaneAusten)][1:10]
+```
+3. Filter *wide_author_dt* to proportions greater than 0.001:
+```{r}
+wide_author_filter_dt <- wide_author_dt[JaneAusten > 0.001 & BronteSisters > 0.001 & HGWells > 0.001]
+wide_author_filter_dt[1:10]
+```
+4. Plot the proportions from *wide_author_filter_dt* in scatter plots of *JaneAusten* vs *BronteSisters* and *JaneAusten* vs *HGWells*:
+```{r}
+RplotterPkg::multi_scatter_plot(
+  df = wide_author_filter_dt,
+  title = "Jane Austen vs Bronte Sisters and H.G. Wells",
+  subtitle = "Proportions of words from all their books",
+  variables = c("BronteSisters", "HGWells"),
+  aes_y = "JaneAusten",
+  aes_label = "word",
+  x_log10 = TRUE,
+  y_log10 = TRUE,
+  x_labels = scales::percent_format(),
+  y_labels = scales::percent_format(),
+  rot_y_tic_label = T,
+  pts_fill = "green",
+  pts_size = 2,
+  col_width = 5.5,
+  row_height = 5.5
+)
+```

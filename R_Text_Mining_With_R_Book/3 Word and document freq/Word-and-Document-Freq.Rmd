@@ -1,0 +1,268 @@
+---
+title: "Text Mining With R"
+output: 
+  html_document:
+    toc: yes
+    toc_depth: 3
+    css: ../style.css
+params:
+  date: !r Sys.Date()       
+---
+
+```{r, echo=FALSE}
+library(data.table)
+library(dplyr)
+library(tidytext)
+library(janeaustenr)
+library(gutenbergr)
+library(stringr)
+library(grid)
+library(gtable)
+library(ggplot2)
+library(RtextminerPkg)
+library(RplotterPkg)
+```
+
+```{r,setup, include=FALSE, eval=TRUE}
+options(knitr.table.format = "html")
+knitr::opts_chunk$set(echo = TRUE, collapse=TRUE, message = FALSE, warning = FALSE, fig.width = 12, fig.height = 8)
+```
+
+<div>Author: Rick Dean</div>
+<div>Article date: `r params$date`</div>
+
+<div class="abstract">
+  <p class="abstract">Abstract</p>
+  The following notes/R scripts were inspired from Chapter 3 of [Text Mining With R](https://www.tidytextmining.com/index.html) by Julia Silge and David Robinson
+</div>  
+
+<div class="note">Note: Functions from the `data.table` and `RtextminerPkg` packages are used in performing many of the following data set operations.</div>
+
+# Analyzing Word and Document Frequency Analysis
+
+## Term frequency
+### Term frequency in Jane Austen's novels
+1. Get the Austen books:
+```{r}
+ja_books_dt <- data.table::setDT(janeaustenr::austen_books())
+str(ja_books_dt)
+```
+2. Tokenize the books by word:
+```{r}
+ja_wrds_lst <- RtextminerPkg::tokenize_text(
+  x = ja_books_dt,
+  input_col = "text",
+  output_col = "word",
+  strip_punct = TRUE
+)
+ja_wrds_dt <- ja_wrds_lst$tokens_dt
+head(ja_wrds_dt)
+```
+3. Get the book totals of words within each book:
+```{r}
+ja_book_totals_dt <- ja_wrds_dt[, .(total = .N), by = book]
+head(ja_book_totals_dt)
+```
+4. Get the word totals within each book:
+```{r}
+ja_wrd_totals_dt <- ja_wrds_dt[, .(n = .N), by = .(book, word)]
+head(ja_wrd_totals_dt)
+```
+5. Outer join book totals (*ja_book_totals_dt*) with word totals (*ja_wrd_totals_dt*) with their common key *book*:
+```{r}
+data.table::setkey(ja_book_totals_dt, book)
+data.table::setkey(ja_wrd_totals_dt, book)
+book_words <- ja_wrd_totals_dt[ja_book_totals_dt, nomatch=0][order(-n)]
+head(book_words)
+```
+<div class="note">Note: *book_words* is ordered by *n*.</div>
+
+6. Add a term frequency (*tf* or word proportion) and calculated by dividing *n* by *total*:
+```{r}
+book_words[, tf := n/total]
+head(book_words)
+```
+7. Plot a histogram of *tf* for each of the books:
+```{r, fig.width=12, fig.height=10}
+RplotterPkg::multi_histogram_plot(
+  df = book_words,
+  factor_var = "book",
+  factor_x = "tf",
+  title = "Proportion of Words for Jane Austen Books",
+  subtitle = "Referred to as 'term frequency'",
+  columns = 3,
+  x_limits = c(NA, 0.0009)
+)
+```
+
+### Zipf's Law
+<blockquote>States that the frequency that a word appears is inversely proportional to its rank.</blockquote>
+
+1. Add a *rank* variable to `book_words`. Again note that *book_words* is ordered within each book by *n*.:
+```{r}
+book_words[, rank := seq_len(.N), by = book]
+head(book_words)
+```
+
+<blockquote>Zipf’s law is often visualized by plotting rank on the x-axis and term frequency on the y-axis, on logarithmic scales. Plotting this way, an inversely proportional relationship will have a constant, negative slope.</blockquote>
+
+2. Plot *rank* vs *tf* for each of the books:
+```{r, fig.width=12, fig.height=10}
+RplotterPkg::create_scatter_plot(
+  df = book_words,
+  aes_x = "rank",
+  aes_y = "tf",
+  aes_color = "book",
+  title = "Zipf’s law: rank vs term frequency",
+  subtitle = "Across Jane Austen's books",
+  pts_line_alpha = 0.8,
+  pts_size = 1.1,
+  x_log10 = TRUE,
+  y_log10 = TRUE,
+  rot_y_tic_label = T,
+  axis_text_size = 12,
+  connect = TRUE,
+  show_pts = FALSE,
+  show_legend = FALSE
+)
+```
+
+### Power Law
+Apply the Power Law to Austen's *tf*.  What is the exponent of the power law for the middle section of the *rank* range.
+
+1. Filter for a subset of the *rank* between 10 and 500:
+```{r}
+middle_rank_dt <- book_words[rank > 10 & rank < 500]
+```
+
+2. Define a linear model fit between *rank* and *tf*:
+```{r}
+middle_rank_lm <- lm(log10(tf) ~ log10(rank), data = middle_rank_dt)
+summary(middle_rank_lm)
+```
+3. Plot the fitted power law to the data:
+```{r, fig.width=12, fig.height=10}
+RplotterPkg::create_scatter_plot(
+  df = book_words,
+  aes_x = "rank",
+  aes_y = "tf",
+  aes_color = "book",
+  title = "Zipf’s law: rank vs term frequency",
+  subtitle = "Across Jane Austen's books",
+  pts_line_alpha = 0.8,
+  pts_size = 1.1,
+  x_log10 = TRUE,
+  y_log10 = TRUE,
+  rot_y_tic_label = T,
+  axis_text_size = 12,
+  connect = TRUE,
+  show_pts = FALSE,
+  show_legend = FALSE
+) + ggplot2::geom_abline(intercept = -0.62, slope = -1.1, color = "red", linetype = 2)
+```
+
+The deviations at high rank with the Power Law giving a higher *tf* is not uncommon.  Austen at the lower rank with more frequent words seems to be lower than usual.
+
+## Term Frequency-Inverse Document Frequency(tf-idf)
+<blockquote>The idea of tf-idf is to find the important words for the content of each document by decreasing the weight for commonly used words and increasing the weight for words that are not used very much in a collection or corpus of documents...</blockquote>
+
+### The tidytext::bind_tf_idf function.
+We can use `tidytext::bind_tf_idf()` to calculate the tf-idf. The only requirement is that the documents are tokenized and we can find the count of each word, in each book.  We have those numbers in column *n* of *book_words* from above.
+
+1. Looking again at *book_words*:
+```{r}
+head(book_words)
+```
+2. Apply `tidytext::bind_tf_idf(word, book, n)` which will bind the tf_idf as a column to *book_words*:
+```{r}
+book_words <- book_words %>%
+    tidytext::bind_tf_idf(term = word, document = book, n = n)
+head(book_words)
+```
+Note that "idf" (inverse document frequency) and "tf_idf" are 0 for extremely common words.  The "idf" will be higher
+for words that occur in fewer of the documents.
+
+Reverse the order of book_words and look at the other end of "tf_idf". Also remove variable "total".
+```{r}
+book_words <- book_words[, !c("total")][order(-tf_idf)]
+head(book_words)
+```
+### The RtextminerPkg::get_tf_idf() function
+`RtextminerPkg::get_tf_idf()` is a data.table based approach to computing the tf-idf. Its only argument requirement is a data frame holding a collection of documents--it will handle the word tokenization. There should be a column for the document id and a second column for the text -- not unlike the Jane Austen collection we've been working with.
+
+1. Looking at the collection again we have 73422 rows of text under the text column and a column that identifies the book:
+```{r}
+ja_books <- janeaustenr::austen_books()
+head(ja_books)
+```
+2. Call `RtextminerPkg::get_tf_idf()`:
+```{r}
+tf_idf_dt <- RtextminerPkg::get_tf_idf(
+  x = ja_books,
+  feature_id = "book",
+  feature_text = "text")
+head(tf_idf_dt)
+```
+### Plot tf_idf values for 15 words across the novels
+All the words are proper nouns.  None of them occur in all the novels, and they are important, characteristic words for each of their corresponding text.
+
+1. For plotting select the top 15 "word" values:
+```{r}
+words_tf_idf <- tf_idf_dt[, setorder(.SD, -tf_idf)[1:15], by = feature_id]
+head(words_tf_idf)
+```
+2. Show a bar plot of the tf_idf values for 15 words across the novels.
+```{r, fig.width = 14, fig.height = 10}
+tf_idf_plot <- RplotterPkg::multi_bar_plot(
+    df = words_tf_idf,
+    factor_var = "feature_id",
+    factor_x = "word",
+    columns = 3,
+    aes_y = "tf_idf",
+    y_titles = rep("tf_idf",6),
+    rot_y_tic_label = TRUE,
+    do_coord_flip = TRUE,
+    order_bars = "asc"
+)
+```
+
+## Corpus of physics texts
+Look at a set set non-fiction physics documents and evaluate the tf-idf for important words.
+
+1. Download the physics:
+```{r}
+physics_books <- gutenberg_download(c(37729, 14725, 13476, 30155), meta_fields = "author")
+```
+
+2. Compute the tf-idf with a set of stop words:
+```{r}
+stop_words <- c("eq", "co", "rc", "ac", "ak", "bn", "fig", "file", "cg", "cb", "cm", "_k", "_k_", "_x")
+tf_idf_physics_dt <- RtextminerPkg::get_tf_idf(
+  x = physics_books,
+  feature_id = "author",
+  feature_text = "text",
+  stopwords = stop_words,
+  lowercase = T,
+  strip_numeric = T,
+  strip_punct = T)
+head(tf_idf_physics_dt)
+```
+3. For plotting select the top 15 "word" values:
+```{r}
+tf_idf_15_physics_dt <- tf_idf_physics_dt[, setorder(.SD, -tf_idf)[1:15], by = feature_id]
+head(tf_idf_15_physics_dt)
+```
+4. Show a bar plot of the tf_idf values for 15 words across the authors.
+```{r, fig.width = 14, fig.height = 10}
+tf_idf_physics_plot <- RplotterPkg::multi_bar_plot(
+    df = tf_idf_15_physics_dt,
+    factor_var = "feature_id",
+    factor_x = "word",
+    columns = 2,
+    aes_y = "tf_idf",
+    y_titles = rep("tf_idf",4),
+    rot_y_tic_label = TRUE,
+    do_coord_flip = TRUE,
+    order_bars = "asc"
+)
+```
